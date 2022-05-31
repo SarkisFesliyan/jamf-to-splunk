@@ -1,5 +1,5 @@
 <form theme="dark">
-  <label>IT-SRE-Jamf-Overview</label>
+  <label>Jamf Overview</label>
   <search id="General">
     <query>index = YOUR_INDEX
 sourcetype = JamfModularInput

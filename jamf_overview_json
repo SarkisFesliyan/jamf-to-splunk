@@ -1,7 +1,7 @@
 <form theme="dark">
   <label>Jamf Overview</label>
   <search id="app_data">
-    <query>index = YOUR_INDEX
+    <query>index = jamf
 sourcetype = jssUapiComputer:app
 |eval event_time=strftime(_time,"%m-%d")
 |dedup computer_meta.udid event_time app.name
@@ -10,7 +10,7 @@ sourcetype = jssUapiComputer:app
 
 | eval versionsplit = split(app.version, "."), Major = mvindex(versionsplit,0), Minor = mvindex(versionsplit,1), Build = mvindex(versionsplit,2), Revision = mvindex(versionsplit,3) 
 
-|join type=left computer_meta.udid [|search index = YOUR_INDEX
+|join type=left computer_meta.udid [|search index = jamf
 sourcetype = jssUapiComputer:computerGeneral
 |rex field=computerGeneral.lastContactTime "(?&lt;checkin_day&gt;\\d\\d\\d\\d-\\d\\d-\\d\\d)T(?&lt;checkin_hour&gt;\\d\\d:\\d\\d:\\d\\d)"
 |eval checkin_time = checkin_day + " " + checkin_hour
@@ -24,27 +24,58 @@ sourcetype = jssUapiComputer:computerGeneral
     <latest>$tok_time.latest$</latest>
   </search>
   <search id="general_data">
-          <query>index = YOUR_INDEX
+    <query>index = jamf
 sourcetype = jssUapiComputer:computerGeneral OR sourcetype = jssUapiComputer:computerHardware OR sourcetype = jssUapiComputer:diskEncryption OR sourcetype = jssUapiComputer:operatingSystem OR sourcetype = jssUapiComputer:userAndLocation
+
+``` remove all duplicate entries for the event days this way we get the latest if a device ingested multiple times per source type```
 |eval event_time=strftime(_time,"%m-%d")
 |dedup computer_meta.udid event_time sourcetype
-|fields - punct source sourcetype splunk_server
+
+``` combine sourcetypes together ```
 | stats values(*) as * by computer_meta.udid
 
+``` Convert Operating systems to major version```
+|eval OS = case('computerOS.version' LIKE "10.9%", "10.9", 
+'computerOS.version' LIKE "10.10%", "10.10",
+'computerOS.version' LIKE "10.11%", "10.11",
+'computerOS.version' LIKE "10.12%", "10.12",
+'computerOS.version' LIKE "10.13%", "10.13",
+'computerOS.version' LIKE "10.14%", "10.14",
+'computerOS.version' LIKE "10.15%", "10.15",
+'computerOS.version' LIKE "10.16%", "11", 
+'computerOS.version' LIKE "11.%", "11",
+'computerOS.version' LIKE "12.%", "12",
+'computerOS.version' LIKE "13.%", "13", 
+'computerOS.version' LIKE "14.%", "14", 
+'computerOS.version' LIKE "15.%", "15",
+'computerOS.version' LIKE "16.%", "16",
+'computerOS.version' LIKE "17.%", "17")
 
+|eval main_model = case('computerHardware.model' LIKE "%MacBook Pro%", "MacBook Pro", 
+'computerHardware.model' LIKE "%MacBook Air%", "MacBook Air", 
+'computerHardware.model' LIKE "%Mac Studio%", "Mac Studio", 
+'computerHardware.model' LIKE "%Mac Mini%", "Mac Mini", 
+'computerHardware.model' LIKE "%Mac Pro%", "Mac Pro", 
+'computerHardware.model' LIKE "%iMac%", "iMac", 
+1=1, computerHardware.model)
+
+``` add IP data although it might not be neccesary ```
 | iplocation allfields=true computerGeneral.lastIpAddress
+``` convert last contact time to day and hours sorry this is bad code but i wrote this peice on a plane with no wifi```
 |rex field=computerGeneral.lastContactTime "(?&lt;checkin_day&gt;\\d\\d\\d\\d-\\d\\d-\\d\\d)T(?&lt;checkin_hour&gt;\\d\\d:\\d\\d:\\d\\d)"
 |eval checkin_time = checkin_day + " " + checkin_hour
 |eval checkin_epoch = strptime('checkin_time', "%Y-%m-%d %H:%M:%S")
 
-|join type=left computer_meta.udid [|search index = YOUR_INDEX
+|join type=left computer_meta.udid [|search index = jamf 
 sourcetype = jssUapiComputer:diskPart
-diskPartition.partitionType = BOOT]</query>
-          <earliest>$tok_time.earliest$</earliest>
-          <latest>$tok_time.latest$</latest>
-        </search>
+diskPartition.partitionType = BOOT] 
+
+</query>
+    <earliest>$tok_time.earliest$</earliest>
+    <latest>$tok_time.latest$</latest>
+  </search>
   <search id="extension_attributes">
-    <query>index = YOUR_INDEX
+    <query>index = jamf
 sourcetype = jssUapiComputer:extensionAttribute
 |table *
 
@@ -52,7 +83,7 @@ sourcetype = jssUapiComputer:extensionAttribute
 |dedup computer_meta.udid event_time sourcetype
 
 
-|join type=left [|search index = YOUR_INDEX
+|join type=left [|search index = jamf
 sourcetype = jssUapiComputer:computerGeneral 
 |eval event_time=strftime(_time,"%m-%d")
 |dedup computer_meta.udid event_time sourcetype
@@ -93,9 +124,6 @@ sourcetype = jssUapiComputer:computerGeneral
     </input>
   </fieldset>
   <row>
-
-
-
     <panel>
       <single>
         <title>Total devices with filters</title>
@@ -112,6 +140,51 @@ sourcetype = jssUapiComputer:computerGeneral
   </row>
   <row>
     <panel>
+      <title>Hardware Models</title>
+      <input type="multiselect" token="tok_main_model" searchWhenChanged="true">
+        <label>Main Model</label>
+        <search base="general_data">
+          <query>|stats count by main_model</query>
+        </search>
+        <choice value="*">All</choice>
+        <default>*</default>
+        <fieldForLabel>main_model</fieldForLabel>
+        <fieldForValue>main_model</fieldForValue>
+        <valuePrefix>main_model = "</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> OR </delimiter>
+      </input>
+      <input type="multiselect" token="tok_hardware_options" searchWhenChanged="true">
+        <label>Hardware Options</label>
+        <choice value="*">All</choice>
+        <default>*</default>
+        <initialValue>*</initialValue>
+        <fieldForLabel>computerHardware.model</fieldForLabel>
+        <fieldForValue>computerHardware.model</fieldForValue>
+        <search base="general_data">
+          <query>|stats count by computerHardware.model</query>
+        </search>
+        <valuePrefix>computerHardware.model = "</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> OR </delimiter>
+      </input>
+      <table>
+        <title>Hardware chart</title>
+        <search base="general_data">
+          <query>|search 
+$tok_hardware_options$
+$tok_main_model$
+|table computer_meta.udid checkin_day computerHardware.model computerGeneral.name userAndLocation.username *</query>
+        </search>
+        <option name="count">5</option>
+        <option name="drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="wrap">false</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
       <title>Operating Systems</title>
       <input type="time" token="tok_os_search_time" searchWhenChanged="true">
         <label>Search time</label>
@@ -122,49 +195,80 @@ sourcetype = jssUapiComputer:computerGeneral
       </input>
       <input type="dropdown" token="tok_span" searchWhenChanged="true">
         <label>Span by Days</label>
-        <choice value="| timechart limit=0 span=1d count by OS">1 Day Span</choice>
-        <choice value="| timechart limit=0 span=7d count by OS">7 Day Span</choice>
-        <choice value="| dedup  computer_meta.udid search_month | stats count by search_month OS | chart values(count) BY search_month OS">30 Day Span</choice>
-        <default>| timechart limit=0 span=7d count by OS</default>
+        <choice value="|stats count by OS event_time |chart values(count) as count by event_time OS">1 Day Span</choice>
+        <choice value="match_long_day_name = True |stats count by OS event_time |chart values(count) as count by event_time OS">7 Day Span</choice>
+        <choice value="|dedup computer_meta.udid event_time_month |stats count by OS event_time_month |chart values(count) as count by event_time_month OS">30 Day Span</choice>
       </input>
       <chart>
         <title>Set check in to the legth of the search time for more accurate results</title>
         <search id="os_specific">
-          <query>index = YOUR_INDEX
+          <query>index = jamf
 sourcetype = jssUapiComputer:operatingSystem
+
+``` remove all duplicate entries for the event days this way we get the latest if a device ingested multiple times per source type```
 |eval event_time=strftime(_time,"%m-%d")
 |dedup computer_meta.udid event_time sourcetype
 
+``` Convert Operating systems to major version```
+|eval OS = case('computerOS.version' LIKE "10.9%", "10.9", 
+'computerOS.version' LIKE "10.10%", "10.10",
+'computerOS.version' LIKE "10.11%", "10.11",
+'computerOS.version' LIKE "10.12%", "10.12",
+'computerOS.version' LIKE "10.13%", "10.13",
+'computerOS.version' LIKE "10.14%", "10.14",
+'computerOS.version' LIKE "10.15%", "10.15",
+'computerOS.version' LIKE "10.16%", "11", 
+'computerOS.version' LIKE "11.%", "11",
+'computerOS.version' LIKE "12.%", "12",
+'computerOS.version' LIKE "13.%", "13", 
+'computerOS.version' LIKE "14.%", "14", 
+'computerOS.version' LIKE "15.%", "15",
+'computerOS.version' LIKE "16.%", "16",
+'computerOS.version' LIKE "17.%", "17")
+
+``` event_time_month is used when searching on a 90 day period.and getting a month over month latest calculation```
+|eval event_time_month = strftime(_time,"%y-%m %b")
+
+``` search_todays_day is used when searching for 30 day period getting the current day week over week.```
+|eval search_todays_day = strftime(now(),"%A")
+
+``` event_time_divide is used when using search_todays_day to find todays date to qualify the event.```
+|eval event_time_day = strftime(_time,"%A")
+
+``` match_long_day_name is used when using search_todays_day to tag the event as an acceptable day were looking for.```
+|eval match_long_day_name = case(event_time_day = search_todays_day, "True", 1=1,"False")
 
 
-|eval OS = case('computerOS.version' LIKE "10.9%", "10.9", 'computerOS.version' LIKE "10.10%", "10.10",'computerOS.version' LIKE "10.11%", "10.11",'computerOS.version' LIKE "10.12%", "10.12",'computerOS.version' LIKE "10.13%", "10.13",'computerOS.version' LIKE "10.14%", "10.14",'computerOS.version' LIKE "10.15%", "10.15",'computerOS.version' LIKE "10.16%", "11", 'computerOS.version' LIKE "11.%", "11",'computerOS.version' LIKE "12.%", "12",'computerOS.version' LIKE "13.%", "13", 'computerOS.version' LIKE "14.%", "14", 'computerOS.version' LIKE "15.%", "15",'computerOS.version' LIKE "16.%", "16")
-
-
-
-
-|eval search_month = strftime(_time,"%y-%m %b")
-|eval search_day = strftime(now(),"%A")
-|eval event_time_divide = strftime(_time,"%A")
-|eval search_case = case(event_time_divide = search_day, "True", 1=1,"False")
-
-|join type=left computer_meta.udid [|search index = YOUR_INDEX
-sourcetype = jssUapiComputer:computerGeneral OR sourcetype = jssUapiComputer:computerHardware OR sourcetype = jssUapiComputer:diskEncryption OR sourcetype = jssUapiComputer:userAndLocation
+``` Join the basic computer data over for the checkin times to also see if its an acceptable event```
+|join type=left computer_meta.udid [|search index = jamf
+sourcetype = jssUapiComputer:computerGeneral OR 
+sourcetype = jssUapiComputer:computerHardware OR 
+sourcetype = jssUapiComputer:diskEncryption OR 
+sourcetype = jssUapiComputer:userAndLocation
 earliest=-24h
-
-|eval event_time=strftime(_time,"%m-%d")
-|dedup computer_meta.udid event_time sourcetype
+|dedup computer_meta.udid sourcetype
+``` remove all duplicate entries based on sourcetype, we only want 1 device per 24 hours```
+``` combine the values ```
 |stats values(*) as * by computer_meta.udid
+``` add IP data although it might not be neccesary ```
 | iplocation allfields=true computerGeneral.lastIpAddress
+``` convert last contact time to day and hours sorry this is bad code but i wrote this peice on a plane with no wifi```
 |rex field=computerGeneral.lastContactTime "(?&lt;checkin_day&gt;\\d\\d\\d\\d-\\d\\d-\\d\\d)T(?&lt;checkin_hour&gt;\\d\\d:\\d\\d:\\d\\d)"
 |eval checkin_time = checkin_day + " " + checkin_hour
 |eval checkin_epoch = strptime('checkin_time', "%Y-%m-%d %H:%M:%S")]
 
 
+``` *** BELOW SHOULD BE DATA IN DASHBOARD SEARCH TIED TO INITIAL SEARCH *** ```
 
+``` This time eval comes from input information from dashboard. input X hour/day/month```
 | eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
 
-$tok_span$
-|fields - NULL</query>
+``` time_eval meaning the time of NOW minus a couple days to stamp where we want to create a checkpoint. Now any device with a epoch checkin time thats greater then that is an acceptable event```
+|eval checkin_search = case(time_eval &lt;= checkin_epoch, "True", 1=1, "False")
+|search checkin_search = True
+
+``` now lets search the acceptable events based on inputs of how to chart the data. Keep in mind we dont use timecharts because in my expereince it doesnt care about checkin time search evaluations ```
+$tok_span$</query>
           <earliest>$tok_os_search_time.earliest$</earliest>
           <latest>$tok_os_search_time.latest$</latest>
         </search>
@@ -181,9 +285,7 @@ $tok_span$
       <title>Todays Sub OS Statistics</title>
       <chart>
         <search base="general_data">
-          <query>|eval OS = case('computerOS.version' LIKE "10.9%", "10.9", 'computerOS.version' LIKE "10.10%", "10.10",'computerOS.version' LIKE "10.11%", "10.11",'computerOS.version' LIKE "10.12%", "10.12",'computerOS.version' LIKE "10.13%", "10.13",'computerOS.version' LIKE "10.14%", "10.14",'computerOS.version' LIKE "10.15%", "10.15",'computerOS.version' LIKE "10.16%", "11", 'computerOS.version' LIKE "11.%", "11",'computerOS.version' LIKE "12.%", "12",'computerOS.version' LIKE "13.%", "13", 'computerOS.version' LIKE "14.%", "14", 'computerOS.version' LIKE "15.%", "15",'computerOS.version' LIKE "16.%", "16")
-
-            |stats count by OS computerOS.version</query>
+          <query>|stats count by OS computerOS.version</query>
         </search>
         <option name="charting.axisTitleX.visibility">collapsed</option>
         <option name="charting.axisTitleY.visibility">collapsed</option>
@@ -216,7 +318,6 @@ $tok_span$
       </table>
     </panel>
   </row>
-
   <row>
     <panel depends="$tok_country_choice$">
       <title>$tok_country_choice$ Country list of users</title>
@@ -462,6 +563,7 @@ extensionAttribute.value = "$tok_extension_value$"
 |fields - _raw
 |table extension* *</query>
         </search>
+        <option name="count">5</option>
         <option name="drilldown">none</option>
         <option name="refresh.display">progressbar</option>
       </table>

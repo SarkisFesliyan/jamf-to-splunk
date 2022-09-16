@@ -4,7 +4,7 @@
     <query>index = jamf
 sourcetype = jssUapiComputer:app
 |eval event_time=strftime(_time,"%m-%d")
-|dedup computer_meta.udid event_time app.name
+|dedup computer_meta.udid app.name
 
 |fields - _raw punct source sourcetype splunk_server
 
@@ -28,8 +28,7 @@ sourcetype = jssUapiComputer:computerGeneral
 sourcetype = jssUapiComputer:computerGeneral OR sourcetype = jssUapiComputer:computerHardware OR sourcetype = jssUapiComputer:diskEncryption OR sourcetype = jssUapiComputer:operatingSystem OR sourcetype = jssUapiComputer:userAndLocation
 
 ``` remove all duplicate entries for the event days this way we get the latest if a device ingested multiple times per source type```
-|eval event_time=strftime(_time,"%m-%d")
-|dedup computer_meta.udid event_time sourcetype
+|dedup computer_meta.udid sourcetype
 
 ``` combine sourcetypes together ```
 | stats values(*) as * by computer_meta.udid
@@ -79,32 +78,35 @@ diskPartition.partitionType = BOOT]
 sourcetype = jssUapiComputer:extensionAttribute
 |table *
 
-|eval event_time=strftime(_time,"%m-%d")
-|dedup computer_meta.udid event_time sourcetype
+
+|dedup computer_meta.udid extensionAttribute.name
 
 
-|join type=left [|search index = jamf
-sourcetype = jssUapiComputer:computerGeneral 
-|eval event_time=strftime(_time,"%m-%d")
-|dedup computer_meta.udid event_time sourcetype
-|fields - punct source sourcetype splunk_server
-| stats values(*) as * by computer_meta.udid
+|join type=left computer_meta.udid [|search index = jamf
+sourcetype = jssUapiComputer:computerGeneral OR 
+sourcetype = jssUapiComputer:computerHardware OR 
+sourcetype = jssUapiComputer:diskEncryption OR 
+sourcetype = jssUapiComputer:userAndLocation
+earliest=-24h
 
-
+|dedup computer_meta.udid sourcetype
+``` remove all duplicate entries based on sourcetype, we only want the latest devices```
+``` combine the values ```
+|stats values(*) as * by computer_meta.udid
+``` add IP data although it might not be neccesary ```
+| iplocation allfields=true computerGeneral.lastIpAddress
+``` convert last contact time to day and hours sorry this is bad code but i wrote this peice on a plane with no wifi```
 |rex field=computerGeneral.lastContactTime "(?&lt;checkin_day&gt;\\d\\d\\d\\d-\\d\\d-\\d\\d)T(?&lt;checkin_hour&gt;\\d\\d:\\d\\d:\\d\\d)"
 |eval checkin_time = checkin_day + " " + checkin_hour
 |eval checkin_epoch = strptime('checkin_time', "%Y-%m-%d %H:%M:%S")
 ]
-
-|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
-|eval checkin_search = case(time_eval &lt;= checkin_epoch, "True", 1=1, "False")
-|search checkin_search = True</query>
+</query>
     <earliest>$tok_time.earliest$</earliest>
     <latest>$tok_time.latest$</latest>
   </search>
   <fieldset submitButton="false" autoRun="false">
     <input type="time" token="tok_time" searchWhenChanged="true">
-      <label>ingest time frame</label>
+      <label>ingest time frame   _______  (how often splunk talks to jamf)</label>
       <default>
         <earliest>-24h@h</earliest>
         <latest>now</latest>
@@ -198,6 +200,7 @@ $tok_main_model$
         <choice value="|stats count by OS event_time |chart values(count) as count by event_time OS">1 Day Span</choice>
         <choice value="match_long_day_name = True |stats count by OS event_time |chart values(count) as count by event_time OS">7 Day Span</choice>
         <choice value="|dedup computer_meta.udid event_time_month |stats count by OS event_time_month |chart values(count) as count by event_time_month OS">30 Day Span</choice>
+        <default>match_long_day_name = True |stats count by OS event_time |chart values(count) as count by event_time OS</default>
       </input>
       <chart>
         <title>Set check in to the legth of the search time for more accurate results</title>
@@ -558,7 +561,14 @@ $tok_app_search$ $app_click_value$
       <table>
         <title>Extensions Attributes</title>
         <search base="extension_attributes">
-          <query>|search extensionAttribute.name = "$tok_extension_attributes$"
+          <query>``` This time eval comes from input information from dashboard. input X hour/day/month```
+| eval time_eval = now() - (30 * 86400)
+
+``` time_eval meaning the time of NOW minus a couple days to stamp where we want to create a checkpoint. Now any device with a epoch checkin time thats greater then that is an acceptable event```
+|eval checkin_search = case(time_eval &lt;= checkin_epoch, "True", 1=1, "False")
+|search checkin_search = True
+
+extensionAttribute.name = "$tok_extension_attributes$"
 extensionAttribute.value = "$tok_extension_value$"
 |fields - _raw
 |table extension* *</query>

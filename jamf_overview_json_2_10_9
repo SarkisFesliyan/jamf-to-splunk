@@ -1,0 +1,645 @@
+<form version="1.1">
+  <label>Jamf Overview</label>
+  <search id="General">
+    <query>index = jamf
+sourcetype = jssUapiComputer:computerGeneral OR 
+sourcetype = jssUapiComputer:computerHardware OR 
+sourcetype = jssUapiComputer:operatingSystem OR 
+sourcetype = jssUapiComputer:userAndLocation OR 
+sourcetype = jssUapiComputer:diskPart
+
+``` remove all duplicate entries for the event days this way we get the latest if a device ingested multiple times per source type```
+|dedup computer_meta.serial sourcetype
+
+``` combine sourcetypes together ```
+| stats values(*) as * by computer_meta.serial
+
+``` Convert Operating systems to major version```
+|rex field=computerOS.version "(?&lt;OS&gt;(?=10)\d\d.\d\d|\d\d)" 
+
+|eval main_model = case('computerHardware.model' LIKE "%MacBook Pro%", "MacBook Pro", 
+'computerHardware.model' LIKE "%MacBook Air%", "MacBook Air", 
+'computerHardware.model' LIKE "%Mac Studio%", "Mac Studio", 
+'computerHardware.model' LIKE "%Mac Mini%", "Mac Mini", 
+'computerHardware.model' LIKE "%Mac Pro%", "Mac Pro", 
+'computerHardware.model' LIKE "%iMac%", "iMac", 
+1=1, computerHardware.model)
+
+``` add IP data although it might not be neccesary ```
+| iplocation allfields=true computerGeneral.lastIpAddress
+
+|rename computerDiskEncryption.bootPartitionEncryptionDetails.partitionName AS diskPartition.name
+|join type=left diskPartition.name [|search index = jamf
+sourcetype = jssUapiComputer:diskEncryption
+|stats values(*) as * by computer_meta.serial
+]
+
+``` convert last contact time to day and hours ```
+|eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
+|eval checkin_time = strftime('computerGeneral.lastContactTime_epoch', "%Y-%m-%d %H:%M:%S")
+
+ </query>
+    <earliest>-24h</earliest>
+    <latest>now</latest>
+  </search>
+  <search id="Map">
+    <query>index = jamf
+sourcetype = "jssUapiComputer:computerGeneral"
+computerGeneral.lastIpAddress = *
+| iplocation allfields=true computerGeneral.lastIpAddress
+|stats values(*) as * by computer_meta.serial
+|fields - punct
+|eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
+|eval checkin_time = strftime('computerGeneral.lastContactTime_epoch', "%Y-%m-%d %H:%M:%S")</query>
+    <earliest>-24h</earliest>
+    <latest>now</latest>
+  </search>
+  <search id="Applications">
+    <query>index=sec-corp-jamf
+sourcetype="jssUapiComputer:app"
+earliest=-24h
+
+| eval versionsplit = split('app.version', "."), Major = mvindex(versionsplit,0), Minor = mvindex(versionsplit,1), Build = mvindex(versionsplit,2), Revision = mvindex(versionsplit,3) 
+| fields computer_meta.id, app.name, app.path, app.version, app.bundleId, Major, Minor, Build, Revision computer_meta.managed computer_meta.name computer_meta.serial computer_meta.assignedUser
+
+
+| join type=left computer_meta.id [| search index=sec-corp-jamf
+sourcetype="jssUapiComputer:computerGeneral"
+|fields computerGeneral.lastContactTime computer_meta.id
+|eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
+|eval checkin_time = strftime('computerGeneral.lastContactTime_epoch', "%Y-%m-%d %H:%M:%S")
+]
+    
+|fields - punct source splunk_server host _raw</query>
+    <earliest>-24h</earliest>
+    <latest>now</latest>
+  </search>
+  <search id="HDD_Data">
+    <query>index = jamf
+sourcetype = jssUapiComputer:diskPart
+
+|eval event_time=strftime(_time,"%m-%d")
+|dedup computer_meta.id event_time
+|table computer_meta.id diskPartition.name diskPartition.partitionType diskPartition.percentUsed diskPartition.fileVault2State computer_meta.serial computer_meta.name computer_meta.managed computer_meta.assignedUser
+
+|join type=left diskPartition.name computer_meta.id [|search index = jamf 
+sourcetype = jssUapiComputer:diskEncryption OR sourcetype=jssUapiComputer:computerGeneral
+
+earliest=-24h
+|eval event_time=strftime(_time,"%m-%d")
+|dedup computer_meta.id event_time sourcetype
+|rename computerDiskEncryption.bootPartitionEncryptionDetails.partitionName as diskPartition.name
+
+|eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
+|eval checkin_time = strftime('computerGeneral.lastContactTime_epoch', "%Y-%m-%d %H:%M:%S")
+
+
+|fields computerGeneral.lastContactTime computerGeneral.lastContactTime_epoch checkin_time computerDiskEncryption.bootPartitionEncryptionDetails.partitionFileVault2State diskPartition.name computerDiskEncryption.individualRecoveryKeyValidityStatus computerDiskEncryption.fileVault2EnabledUserNames{} computer_meta.id computerDiskEncryption.institutionalRecoveryKeyPresent computerDiskEncryption.bootPartitionEncryptionDetails.partitionFileVault2State computerDiskEncryption.bootPartitionEncryptionDetails.partitionFileVault2Percent
+|stats values(*) as * by computer_meta.id
+]
+|dedup diskPartition.name computer_meta.id</query>
+    <earliest>-24h</earliest>
+    <latest>now</latest>
+  </search>
+  <search id="OS">
+    <query>index = jamf
+sourcetype = "jssUapiComputer:operatingSystem"
+
+
+|eval event_time=strftime(_time,"%m-%d")
+|dedup computer_meta.id event_time
+
+|rex field=computerOS.version "(?&lt;OS&gt;(?=10)\d\d.\d\d|\d\d)" 
+|eval computerOS.version = case(match('computerOS.version', "\d*\.\d*\.\d*"), 'computerOS.version', match('computerOS.version', "\d*\.\d+"), 'computerOS.version' + ".0", 1=1, "not calculated")
+
+|eval search_month = strftime(_time,"%y-%m %b")
+|eval search_day = strftime(now(),"%A")
+|eval event_time_divide = strftime(_time,"%A")
+|eval search_case = case(event_time_divide = search_day, "True", 1=1,"False")
+
+|join type=left computer_meta.id [|search index = jamf
+sourcetype = "jssUapiComputer:computerGeneral"
+earliest=-24h
+|eval event_time=strftime(_time,"%m-%d")
+|dedup computer_meta.id event_time
+|fields computer_meta.name computer_meta.id computerGeneral.lastContactTime
+|eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
+]
+
+|join type=left computer_meta.id [|search index = jamf 
+sourcetype = jssUapiComputer:diskEncryption
+computerDiskEncryption.individualRecoveryKeyValidityStatus = "*"
+earliest=-24h
+|eval event_time=strftime(_time,"%m-%d")
+|dedup computer_meta.id event_time
+|table computerDiskEncryption.bootPartitionEncryptionDetails.partitionFileVault2State computerDiskEncryption.bootPartitionEncryptionDetails.partitionName computerDiskEncryption.individualRecoveryKeyValidityStatus computer_meta.id
+]
+
+
+</query>
+    <earliest>$tok_search_time.earliest$</earliest>
+    <latest>$tok_search_time.latest$</latest>
+  </search>
+  <search id="ExtensionAttributes">
+    <query>index = jamf
+sourcetype = "jssUapiComputer:extensionAttribute"
+extensionAttribute.name = "*"
+|dedup computer_meta.id extensionAttribute.name
+|fields computer_meta.id extensionAttribute.dataType extensionAttribute.definitionId extensionAttribute.description extensionAttribute.enabled extensionAttribute.name extensionAttribute.value extensionAttribute.values{}
+
+| join type=left computer_meta.id [| search index=sec-corp-jamf
+sourcetype="jssUapiComputer:computerGeneral"
+|fields computerGeneral.lastContactTime computer_meta.id computer_meta.name computer_meta.managed 
+|eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
+|eval checkin_time = strftime('computerGeneral.lastContactTime_epoch', "%Y-%m-%d %H:%M:%S")
+] 
+</query>
+    <earliest>-24h</earliest>
+    <latest>now</latest>
+  </search>
+  <fieldset submitButton="false">
+    <input type="text" token="tok_time" searchWhenChanged="true">
+      <label>Checkin Time</label>
+      <default>30</default>
+    </input>
+    <input type="radio" token="tok_time_multiplier" searchWhenChanged="true">
+      <label>Time Multiplier</label>
+      <choice value="9999999999">All</choice>
+      <choice value="2629743">Months</choice>
+      <choice value="86400">Days</choice>
+      <choice value="3600">Hours</choice>
+      <default>86400</default>
+    </input>
+    <input type="dropdown" token="tok_managed" searchWhenChanged="true">
+      <label>Managed</label>
+      <choice value="*">All</choice>
+      <choice value="true">True</choice>
+      <choice value="false">False</choice>
+      <default>true</default>
+    </input>
+    <input type="checkbox" token="tok_hn_exclusion" searchWhenChanged="true">
+      <label>Hostname Exclusion</label>
+      <choice value="n.a">None</choice>
+      <valuePrefix>computer_meta.name !=</valuePrefix>
+      <delimiter> AND </delimiter>
+      <default>n.a</default>
+      <initialValue>n.a</initialValue>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <chart>
+        <title>API Usage</title>
+        <search>
+          <query>index = jamf 
+sourcetype = httpevent
+
+|rex field=_raw "username=(?&lt;user_name&gt;.*), status=(?&lt;HTTP_Status&gt;.*), ipAddress=(?&lt;ip_address&gt;.*), entryPoint=(?&lt;entryPoint&gt;.*)"
+|rex field=_raw "\[(?&lt;user_name&gt;.*) \((?&lt;user_id&gt;.*): 57\)\] \[(?&lt;action_taken&gt;.*)\] \[(?&lt;object_type&gt;.*)\] \[(?&lt;time_executed&gt;.*)\]\R.ID\s*(?&lt;computer_id&gt;.*)\R.Name\s\.*\s(?&lt;computer_host_name&gt;.*)"
+|timechart count by user_name span=1m</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <chart>
+        <title>Actions taken</title>
+        <search>
+          <query>index = jamf 
+sourcetype = httpevent
+
+|rex field=_raw "username=(?&lt;user_name&gt;.*), status=(?&lt;HTTP_Status&gt;.*), ipAddress=(?&lt;ip_address&gt;.*), entryPoint=(?&lt;entryPoint&gt;.*)"
+|rex field=_raw "\[(?&lt;user_name&gt;.*) \((?&lt;user_id&gt;.*): 57\)\] \[(?&lt;action_taken&gt;.*)\] \[(?&lt;object_type&gt;.*)\] \[(?&lt;time_executed&gt;.*)\]\R.ID\s*(?&lt;computer_id&gt;.*)\R.Name\s\.*\s(?&lt;computer_host_name&gt;.*)"
+|search action_taken = *
+object_type = *
+|timechart count(action_taken) by user_name span=30m</query>
+          <earliest>-24h@h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel depends="$tok_country_choice$">
+      <title>$tok_country_choice$ Country list of users</title>
+      <table>
+        <search base="Map">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+Country = "$tok_country_choice$"</query>
+        </search>
+        <option name="count">6</option>
+        <option name="drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Country Map</title>
+      <map>
+        <search base="Map">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+|stats count by Country
+| geom geo_countries featureIdField="Country"</query>
+        </search>
+        <option name="drilldown">all</option>
+        <option name="height">549</option>
+        <option name="mapping.choroplethLayer.colorMode">categorical</option>
+        <option name="mapping.legend.placement">bottomright</option>
+        <option name="mapping.map.center">(36.39,-50.45)</option>
+        <option name="mapping.map.zoom">3</option>
+        <option name="mapping.type">choropleth</option>
+        <drilldown>
+          <set token="tok_country_choice">$click.value$</set>
+        </drilldown>
+      </map>
+    </panel>
+    <panel>
+      <title>City Map</title>
+      <map>
+        <search base="Map">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+| geostats globallimit=5000 count by City</query>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="height">549</option>
+        <option name="mapping.legend.placement">bottomright</option>
+        <option name="mapping.map.center">(36.39,-10.9)</option>
+        <option name="mapping.map.zoom">3</option>
+        <option name="mapping.type">marker</option>
+      </map>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <input type="text" token="tok_percentage_full" searchWhenChanged="true">
+        <label>HDD Percentage Full</label>
+        <default>0</default>
+      </input>
+      <input type="dropdown" token="tok_percentage_full_search" searchWhenChanged="true">
+        <label>Less | More</label>
+        <choice value="&lt;=">Less Than</choice>
+        <choice value="&gt;=">More Than</choice>
+        <default>&gt;=</default>
+      </input>
+      <input type="multiselect" token="tok_encrypted" searchWhenChanged="true">
+        <label>Encrypted</label>
+        <choice value="*">All_Values</choice>
+        <initialValue>*</initialValue>
+        <fieldForLabel>diskPartition.fileVault2State</fieldForLabel>
+        <fieldForValue>diskPartition.fileVault2State</fieldForValue>
+        <search base="HDD_Data">
+          <query>|stats count by diskPartition.fileVault2State</query>
+        </search>
+        <valuePrefix>diskPartition.fileVault2State = "</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> OR </delimiter>
+      </input>
+      <input type="multiselect" token="tok_volume_type" searchWhenChanged="true">
+        <label>Volume Type</label>
+        <choice value="*">All_Values</choice>
+        <initialValue>*</initialValue>
+        <fieldForLabel>diskPartition.partitionType</fieldForLabel>
+        <fieldForValue>diskPartition.partitionType</fieldForValue>
+        <search base="HDD_Data">
+          <query>|stats count by diskPartition.partitionType</query>
+        </search>
+        <valuePrefix>diskPartition.partitionType = "</valuePrefix>
+        <valueSuffix>"</valueSuffix>
+        <delimiter> OR </delimiter>
+      </input>
+      <input type="dropdown" token="tok_fv_key_status" searchWhenChanged="true">
+        <label>FV Key Status</label>
+        <choice value="*">All</choice>
+        <fieldForLabel>computerDiskEncryption.individualRecoveryKeyValidityStatus</fieldForLabel>
+        <fieldForValue>computerDiskEncryption.individualRecoveryKeyValidityStatus</fieldForValue>
+        <search base="HDD_Data">
+          <query>|stats count by computerDiskEncryption.individualRecoveryKeyValidityStatus</query>
+        </search>
+        <initialValue>*</initialValue>
+        <default>*</default>
+        <prefix>computerDiskEncryption.individualRecoveryKeyValidityStatus = </prefix>
+      </input>
+      <table>
+        <title>HD Info</title>
+        <search base="HDD_Data">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+|dedup computer_meta.id
+
+|search $tok_encrypted$
+$tok_fv_key_status$
+$tok_volume_type$
+|fields - _raw _time splunk_server
+|table computerOS.fileVault2Status *</query>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+      </table>
+    </panel>
+    <panel>
+      <title>HDD Boot type status</title>
+      <chart>
+        <search base="HDD_Data">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+
+|dedup computer_meta.id
+|stats count by computerOS.fileVault2Status</query>
+        </search>
+        <option name="charting.chart">bar</option>
+        <option name="charting.chart.showDataLabels">all</option>
+        <option name="charting.drilldown">none</option>
+        <option name="height">763</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Applications</title>
+      <input type="text" token="tok_app.name" searchWhenChanged="true">
+        <label>Application Name</label>
+        <default>*Slack*</default>
+        <prefix>"</prefix>
+        <suffix>"</suffix>
+      </input>
+      <chart>
+        <search base="Applications">
+          <query>|search app.name = $tok_app.name$
+         |eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+
+
+|stats count by app.name app.version</query>
+        </search>
+        <option name="charting.axisTitleX.visibility">collapsed</option>
+        <option name="charting.axisTitleY.visibility">collapsed</option>
+        <option name="charting.axisTitleY2.visibility">collapsed</option>
+        <option name="charting.chart">pie</option>
+        <option name="charting.chart.sliceCollapsingThreshold">0.01</option>
+        <option name="charting.drilldown">all</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="trellis.enabled">1</option>
+        <drilldown>
+          <set token="app_click_value">$click.value$</set>
+          <set token="app_trellis_value">$trellis.value$</set>
+        </drilldown>
+      </chart>
+    </panel>
+    <panel depends="$app_click_value$">
+      <title>$app_trellis_value$ : $app_click_value$</title>
+      <input type="radio" token="tok_app_search" searchWhenChanged="true">
+        <label></label>
+        <choice value="&quot;eq&quot;">Equal</choice>
+        <choice value="&quot;less&quot;">Less than</choice>
+        <choice value="&quot;greater&quot;">Greater than</choice>
+        <choice value="&quot;less&quot; OR version_query_search = &quot;eq&quot;">Less than or Equal</choice>
+        <choice value="&quot;greater&quot; OR version_query_search = &quot;eq&quot;">Greater than or Equal</choice>
+        <choice value="&quot;*&quot;">All</choice>
+        <default>"eq"</default>
+      </input>
+      <table>
+        <search base="Applications">
+          <query>|search app.name = "$app_trellis_value$"
+
+| eval current_click_value_version = split("$app_click_value$", "."), c_Major = mvindex(current_click_value_version,0), c_Minor = mvindex(current_click_value_version,1), c_Build = mvindex(current_click_value_version,2), c_Revision = mvindex(current_click_value_version,3)
+
+| eval Major = case(Major = Major, Major, 1=1, 0)
+| eval c_Major =  case(c_Major = c_Major, c_Major, 1=1, 0)
+| eval Minor = case(Minor = Minor, Minor, 1=1, 0)
+| eval c_Minor =  case(c_Minor = c_Minor, c_Minor, 1=1, 0)
+| eval Build = case(Build = Build, Build, 1=1, 0)
+| eval c_Build =  case(c_Build = c_Build, c_Build, 1=1, 0)
+| eval Revision = case(Revision = Revision, Revision, 1=1, 0)
+| eval c_Revision =  case(c_Revision = c_Revision, c_Revision, 1=1, 0)
+
+
+|eval version_query_search = case(Major = c_Major AND Minor = c_Minor AND Build = c_Build AND Revision = c_Revision, "eq",
+Major &gt; c_Major OR (Major = c_Major AND Minor &gt; c_Minor) OR (Major = c_Major AND Minor = c_Minor AND Build &gt; c_Build) OR (Major = c_Major AND Minor = c_Minor AND Build = c_Build AND Revision &gt; c_Revision), "greater",
+Major &lt; c_Major OR (Major = c_Major AND Minor &lt; c_Minor) OR (Major = c_Major AND Minor = c_Minor AND Build &lt; c_Build) OR (Major = c_Major AND Minor = c_Minor AND Build = c_Build AND Revision &lt; c_Revision), "less",
+1=1, "Not calculated")
+
+
+
+
+|search version_query_search = $tok_app_search$
+
+|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+
+
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+|table app.name app.version computer_meta.serial computer_meta.id computer_meta.name</query>
+        </search>
+        <option name="count">5</option>
+        <option name="drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="wrap">false</option>
+      </table>
+    </panel>
+    <panel>
+      <single>
+        <title>Total App count</title>
+        <search base="Applications">
+          <query>|search app.name = $tok_app.name$
+
+|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+
+|stats count as Total</query>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="height">343</option>
+        <option name="refresh.display">progressbar</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Operating Systems</title>
+      <input type="time" token="tok_search_time" searchWhenChanged="true">
+        <label>Search time</label>
+        <default>
+          <earliest>-30d@d</earliest>
+          <latest>now</latest>
+        </default>
+      </input>
+      <input type="dropdown" token="tok_span" searchWhenChanged="true">
+        <label>Span by Days</label>
+        <choice value="|timechart limit=0 span=1d count by OS">1 Day Span</choice>
+        <choice value="|search search_case = True | timechart limit=0 span=7d count by OS">7 Day Span</choice>
+        <choice value="|dedup  computer_meta.id search_month | stats count by search_month OS | chart values(count) BY search_month OS">30 Day Span</choice>
+        <default>|search search_case = True | timechart limit=0 span=7d count by OS</default>
+      </input>
+      <chart>
+        <title>Set check in to the legth of the search time for more accurate results</title>
+        <search base="OS">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|search
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+
+$tok_span$
+|fields - NULL</query>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.showDataLabels">all</option>
+        <option name="charting.chart.stackMode">default</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="height">544</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Todays Sub OS Statistics</title>
+      <chart>
+        <search base="OS">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+
+|stats count by OS computerOS.version</query>
+        </search>
+        <option name="charting.axisTitleX.visibility">collapsed</option>
+        <option name="charting.axisTitleY.visibility">collapsed</option>
+        <option name="charting.axisTitleY2.visibility">collapsed</option>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">all</option>
+        <option name="charting.legend.placement">none</option>
+        <option name="height">599</option>
+        <option name="refresh.display">progressbar</option>
+        <option name="trellis.enabled">1</option>
+        <option name="trellis.size">medium</option>
+        <drilldown>
+          <set token="tok_sub_os_clicked">$trellis.value$</set>
+        </drilldown>
+      </chart>
+    </panel>
+    <panel depends="$tok_sub_os_clicked$">
+      <chart>
+        <title>Sub OS Clicked - $tok_sub_os_clicked$</title>
+        <search base="OS">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|search
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+OS = $tok_sub_os_clicked$
+|search search_case = True | timechart limit=0 span=7d count by computerOS.version
+|fields - NULL</query>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.chart.showDataLabels">all</option>
+        <option name="charting.drilldown">none</option>
+        <option name="charting.layout.splitSeries">0</option>
+        <option name="height">632</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Extension Attributes</title>
+      <input type="dropdown" token="tok_extension_attribute" searchWhenChanged="true">
+        <label>Extension Attribute</label>
+        <choice value="*">All</choice>
+        <default>*</default>
+        <fieldForLabel>extensionAttribute.name</fieldForLabel>
+        <fieldForValue>extensionAttribute.name</fieldForValue>
+        <search base="ExtensionAttributes">
+          <query>|stats count by extensionAttribute.name</query>
+        </search>
+      </input>
+      <input type="text" token="tok_extensionAttribute.value" searchWhenChanged="true">
+        <label>filter Extension Value</label>
+        <default>*</default>
+      </input>
+      <table>
+        <search base="ExtensionAttributes">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+
+| eval extensionAttribute.value = case(isnull('extensionAttribute.value'), 'extensionAttribute.values{}', 1=1, 'extensionAttribute.value')
+
+|search
+extensionAttribute.name = "$tok_extension_attribute$"
+extensionAttribute.value = "$tok_extensionAttribute.value$" 
+
+
+|table computer_meta.name computer_meta.id extensionAttribute.name extensionAttribute.description extensionAttribute.dataType extensionAttribute.value extensionAttribute.values{} extensionAttribute.definitionId  extensionAttribute.enabled</query>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="refresh.display">progressbar</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Extension Values</title>
+      <chart>
+        <search base="ExtensionAttributes">
+          <query>|eval time_eval = now() - ($tok_time$ * $tok_time_multiplier$)
+|eval checkin_search = case(time_eval &lt;= 'computerGeneral.lastContactTime_epoch', "True", 1=1, "False")
+|search checkin_search = True
+computer_meta.managed = $tok_managed$
+$tok_hn_exclusion$
+extensionAttribute.name = "$tok_extension_attribute$"
+| eval extensionAttribute.value = case(isnull('extensionAttribute.value'), 'extensionAttribute.values{}', 1=1, 'extensionAttribute.value')
+
+|stats count by extensionAttribute.value</query>
+        </search>
+        <option name="charting.chart">pie</option>
+        <option name="charting.drilldown">none</option>
+        <option name="height">599</option>
+        <option name="refresh.display">progressbar</option>
+      </chart>
+    </panel>
+  </row>
+</form>

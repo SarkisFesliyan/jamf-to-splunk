@@ -55,7 +55,7 @@ computerGeneral.lastIpAddress = *
     <latest>now</latest>
   </search>
   <search id="Applications">
-    <query>index=sec-corp-jamf
+    <query>index=jamf
 sourcetype="jssUapiComputer:app"
 earliest=-24h
 
@@ -63,7 +63,7 @@ earliest=-24h
 | fields computer_meta.id, app.name, app.path, app.version, app.bundleId, Major, Minor, Build, Revision computer_meta.managed computer_meta.name computer_meta.serial computer_meta.assignedUser
 
 
-| join type=left computer_meta.id [| search index=sec-corp-jamf
+| join type=left computer_meta.id [| search index=jamf
 sourcetype="jssUapiComputer:computerGeneral"
 |fields computerGeneral.lastContactTime computer_meta.id
 |eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
@@ -147,7 +147,7 @@ extensionAttribute.name = "*"
 |dedup computer_meta.id extensionAttribute.name
 |fields computer_meta.id extensionAttribute.dataType extensionAttribute.definitionId extensionAttribute.description extensionAttribute.enabled extensionAttribute.name extensionAttribute.value extensionAttribute.values{}
 
-| join type=left computer_meta.id [| search index=sec-corp-jamf
+| join type=left computer_meta.id [| search index=jamf
 sourcetype="jssUapiComputer:computerGeneral"
 |fields computerGeneral.lastContactTime computer_meta.id computer_meta.name computer_meta.managed 
 |eval computerGeneral.lastContactTime_epoch = strptime('computerGeneral.lastContactTime', "%Y-%m-%dT%H:%M:%S.%3QZ")
